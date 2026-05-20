@@ -100,12 +100,23 @@ final class SettingsPage
             </table>
 
             <h2>Endpoints REST</h2>
+            <p class="description">Base URL : <code><?php echo esc_html($rest_root); ?></code></p>
             <table class="form-table" role="presentation">
-                <tr><th scope="row">Base URL</th><td><code><?php echo esc_html($rest_root); ?></code></td></tr>
-                <tr><th scope="row">Health</th><td><code>GET <?php echo esc_html($rest_root); ?>health</code> <em>(public)</em></td></tr>
-                <tr><th scope="row">Dossiers</th><td><code>GET <?php echo esc_html($rest_root); ?>dossiers</code></td></tr>
-                <tr><th scope="row">Clients</th><td><code>GET <?php echo esc_html($rest_root); ?>clients</code></td></tr>
-                <tr><th scope="row">KPIs</th><td><code>GET <?php echo esc_html($rest_root); ?>kpis</code></td></tr>
+                <tr><th scope="row">Health (public)</th><td><code>GET /health</code></td></tr>
+                <tr><th scope="row">KPIs</th><td><code>GET /kpis</code></td></tr>
+                <tr><th scope="row">Dossiers</th><td>
+                    <code>GET /dossiers</code> · <code>POST /dossiers</code><br>
+                    <code>GET|PUT|DELETE /dossiers/{id}</code><br>
+                    <code>POST /dossiers/{id}/renew</code><br>
+                    <code>POST /dossiers/{id}/provision</code><br>
+                    <code>POST /dossiers/{id}/migrate-host</code><br>
+                    <code>POST /dossiers/{id}/credentials/rotate</code>
+                </td></tr>
+                <tr><th scope="row">Clients</th><td><code>GET /clients</code></td></tr>
+                <tr><th scope="row">Panels IPTV</th><td><code>GET /panels</code> <em>(requiert iptv-core)</em></td></tr>
+                <tr><th scope="row">Audit log</th><td><code>GET /audit-log</code> <em>(requiert iptv-core)</em></td></tr>
+                <tr><th scope="row">Email templates</th><td><code>GET|PUT /email-templates</code></td></tr>
+                <tr><th scope="row">Cron renouvellement</th><td><code>GET|PUT /cron/renewal</code></td></tr>
             </table>
 
             <h2>Dashboard externe</h2>
