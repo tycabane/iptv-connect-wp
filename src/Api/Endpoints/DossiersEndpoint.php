@@ -41,12 +41,13 @@ final class DossiersEndpoint
         $per_page = max(1, min(200, (int) $request->get_param('per_page')));
         $search   = sanitize_text_field((string) $request->get_param('search'));
         $status   = sanitize_text_field((string) $request->get_param('status'));
+        $since    = sanitize_text_field((string) $request->get_param('since')); // ISO 8601
 
         if (post_type_exists('iptv_dossier')) {
-            return self::listFromIptvCore($page, $per_page, $search, $status);
+            return self::listFromIptvCore($page, $per_page, $search, $status, $since);
         }
         if (class_exists('WooCommerce')) {
-            return self::listFromWcOrders($page, $per_page, $search, $status);
+            return self::listFromWcOrders($page, $per_page, $search, $status, $since);
         }
         return new WP_REST_Response([
             'items' => [], 'total' => 0, 'page' => $page,
@@ -125,6 +126,7 @@ final class DossiersEndpoint
         }
 
         IptvCoreBridge::audit('CREATE_DOSSIER', 'dossier', (int) $post_id, ['email' => $email]);
+        do_action('iptv_connect/dossier.created', (int) $post_id, $body);
 
         $post = get_post((int) $post_id);
         return new WP_REST_Response(self::serializeIptvDossier($post, false), 201);
@@ -147,6 +149,7 @@ final class DossiersEndpoint
         self::applyDossierMeta($id, $body);
 
         IptvCoreBridge::audit('EDIT_DOSSIER', 'dossier', $id, ['fields' => array_keys($body)]);
+        do_action('iptv_connect/dossier.updated', $id, $body);
 
         return new WP_REST_Response(self::serializeIptvDossier(get_post($id), false), 200);
     }
@@ -169,6 +172,7 @@ final class DossiersEndpoint
         }
 
         IptvCoreBridge::audit('DELETE_DOSSIER', 'dossier', $id);
+        do_action('iptv_connect/dossier.deleted', $id);
         return new WP_REST_Response(['ok' => true, 'id' => $id], 200);
     }
 
@@ -194,6 +198,7 @@ final class DossiersEndpoint
 
         $status = !empty($result['ok']) ? 200 : 422;
         IptvCoreBridge::audit('RENEW_DOSSIER', 'dossier', $id, ['months' => $months, 'ok' => !empty($result['ok'])]);
+        do_action('iptv_connect/dossier.renewed', $id, $months, $result);
         return new WP_REST_Response($result, $status);
     }
 
@@ -217,6 +222,7 @@ final class DossiersEndpoint
 
         $status = !empty($result['ok']) ? 200 : 422;
         IptvCoreBridge::audit('PROVISION_DOSSIER', 'dossier', $id, ['ok' => !empty($result['ok'])]);
+        do_action('iptv_connect/dossier.provisioned', $id, $result);
         return new WP_REST_Response($result, $status);
     }
 
@@ -256,6 +262,7 @@ final class DossiersEndpoint
         }
 
         IptvCoreBridge::audit('MIGRATE_CREDS', 'dossier', $id, ['old_host' => $old_host, 'new_host' => $new_host]);
+        do_action('iptv_connect/dossier.host_migrated', $id, $old_host, $new_host);
         return new WP_REST_Response([
             'ok' => true, 'id' => $id, 'old_host' => $old_host, 'new_host' => $new_host,
         ], 200);
@@ -297,6 +304,7 @@ final class DossiersEndpoint
         }
 
         IptvCoreBridge::audit('ROTATE_KEY', 'dossier', $id, ['field' => $field]);
+        do_action('iptv_connect/credentials.rotated', $id, $field);
         return new WP_REST_Response(['ok' => true, 'id' => $id, 'field' => $field], 200);
     }
 
@@ -339,14 +347,14 @@ final class DossiersEndpoint
        Source 1 : iptv-core
        ───────────────────────────────────────────────────── */
 
-    private static function listFromIptvCore(int $page, int $per_page, string $search, string $status): WP_REST_Response
+    private static function listFromIptvCore(int $page, int $per_page, string $search, string $status, string $since = ''): WP_REST_Response
     {
         $args = [
             'post_type'      => 'iptv_dossier',
             'post_status'    => 'publish',
             'posts_per_page' => $per_page,
             'paged'          => $page,
-            'orderby'        => 'date',
+            'orderby'        => 'modified',
             'order'          => 'DESC',
         ];
         if ($status !== '') {
@@ -354,6 +362,14 @@ final class DossiersEndpoint
         }
         if ($search !== '') {
             $args['s'] = $search;
+        }
+        // Sync incrémentale : ne retourne que les dossiers modifiés depuis $since
+        if ($since !== '' && ($ts = strtotime($since)) !== false) {
+            $args['date_query'] = [[
+                'column'    => 'post_modified_gmt',
+                'after'     => gmdate('Y-m-d H:i:s', $ts),
+                'inclusive' => true,
+            ]];
         }
 
         $q = new \WP_Query($args);
@@ -419,7 +435,7 @@ final class DossiersEndpoint
        Source 2 : WooCommerce (fallback lecture seule)
        ───────────────────────────────────────────────────── */
 
-    private static function listFromWcOrders(int $page, int $per_page, string $search, string $status): WP_REST_Response
+    private static function listFromWcOrders(int $page, int $per_page, string $search, string $status, string $since = ''): WP_REST_Response
     {
         $args = [
             'limit'    => $per_page,
@@ -430,6 +446,9 @@ final class DossiersEndpoint
         ];
         if ($search !== '') {
             $args['billing_email'] = $search;
+        }
+        if ($since !== '' && ($ts = strtotime($since)) !== false) {
+            $args['date_modified'] = '>=' . gmdate('Y-m-d H:i:s', $ts);
         }
         $orders = wc_get_orders($args);
         $items = [];

@@ -28,10 +28,13 @@ final class AuditLogEndpoint
         $offset = max(0, (int) $request->get_param('offset'));
         $action = sanitize_text_field((string) $request->get_param('action'));
         $target = sanitize_text_field((string) $request->get_param('target_type'));
+        $since  = sanitize_text_field((string) $request->get_param('since'));
 
         // Méthode 1 : passer par la classe AuditLogger si dispo
+        // (skip si filtres avancés présents — fallback SQL direct nécessaire)
         $class = '\\IptvCore\\Security\\AuditLogger';
-        if (class_exists($class) && method_exists($class, 'recent') && $offset === 0 && $action === '' && $target === '') {
+        if (class_exists($class) && method_exists($class, 'recent')
+            && $offset === 0 && $action === '' && $target === '' && $since === '') {
             try {
                 $items = call_user_func([$class, 'recent'], $limit);
                 return new WP_REST_Response([
@@ -56,6 +59,10 @@ final class AuditLogEndpoint
         $args  = [];
         if ($action !== '') { $where[] = 'action = %s';      $args[] = $action; }
         if ($target !== '') { $where[] = 'target_type = %s'; $args[] = $target; }
+        if ($since  !== '' && ($ts = strtotime($since)) !== false) {
+            $where[] = 'created_at >= %s';
+            $args[]  = gmdate('Y-m-d H:i:s', $ts);
+        }
         $sql_where = $where ? 'WHERE ' . implode(' AND ', $where) : '';
 
         $count_sql = "SELECT COUNT(*) FROM {$table} {$sql_where}";
