@@ -10,6 +10,7 @@ namespace IptvConnect;
 use IptvConnect\Admin\SettingsPage;
 use IptvConnect\Api\RestController;
 use IptvConnect\Updater\GitHubUpdater;
+use IptvConnect\Webhooks\WebhookDispatcher;
 
 /**
  * Bootstrap — point d'entrée du plugin. Enregistre tous les hooks WP.
@@ -32,6 +33,12 @@ final class Bootstrap
 
         // 3. Auto-update depuis GitHub Releases
         GitHubUpdater::register();
+
+        // 4. Dispatcher webhooks (écoute les hooks iptv_connect/* et POST vers le dashboard)
+        WebhookDispatcher::register();
+
+        // 5. Hook cron pour retry des webhooks échoués
+        add_action('iptv_connect_webhook_retry', [WebhookDispatcher::class, 'retryHandler'], 10, 5);
     }
 
     /**

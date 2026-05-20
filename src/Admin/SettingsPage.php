@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace IptvConnect\Admin;
 
 use IptvConnect\Bootstrap;
+use IptvConnect\Webhooks\WebhookDispatcher;
 
 /**
  * SettingsPage — page admin "🔌 Dashboard Connect"
@@ -56,6 +57,28 @@ final class SettingsPage
             wp_safe_redirect(add_query_arg(['saved' => '1'], admin_url('options-general.php?page=' . self::PAGE_SLUG)));
             exit;
         }
+
+        if ($action === 'save_webhooks' && check_admin_referer(self::NONCE_ROTATE)) {
+            $wh_url    = esc_url_raw((string) ($_POST['webhook_url'] ?? ''));
+            $wh_secret = trim((string) ($_POST['webhook_secret'] ?? ''));
+            update_option(WebhookDispatcher::OPT_URL, $wh_url);
+            update_option(WebhookDispatcher::OPT_SECRET, $wh_secret);
+            wp_safe_redirect(add_query_arg(['webhooks_saved' => '1'], admin_url('options-general.php?page=' . self::PAGE_SLUG)));
+            exit;
+        }
+
+        if ($action === 'rotate_webhook_secret' && check_admin_referer(self::NONCE_ROTATE)) {
+            $new = bin2hex(random_bytes(32));
+            update_option(WebhookDispatcher::OPT_SECRET, $new);
+            wp_safe_redirect(add_query_arg(['webhook_secret_rotated' => '1'], admin_url('options-general.php?page=' . self::PAGE_SLUG)));
+            exit;
+        }
+
+        if ($action === 'test_webhook' && check_admin_referer(self::NONCE_ROTATE)) {
+            do_action('iptv_connect/dossier.created', 0, ['email' => 'test@webhook.local', 'test' => true]);
+            wp_safe_redirect(add_query_arg(['webhook_tested' => '1'], admin_url('options-general.php?page=' . self::PAGE_SLUG)));
+            exit;
+        }
     }
 
     public static function render(): void
@@ -76,6 +99,15 @@ final class SettingsPage
             <?php endif; ?>
             <?php if (!empty($_GET['saved'])): ?>
                 <div class="notice notice-success is-dismissible"><p>URL du dashboard enregistrée.</p></div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['webhooks_saved'])): ?>
+                <div class="notice notice-success is-dismissible"><p>Configuration webhooks enregistrée.</p></div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['webhook_secret_rotated'])): ?>
+                <div class="notice notice-success is-dismissible"><p>Nouveau secret webhook généré. <strong>Mettez à jour le dashboard avec la nouvelle valeur.</strong></p></div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['webhook_tested'])): ?>
+                <div class="notice notice-info is-dismissible"><p>Webhook de test envoyé (event <code>dossier.created</code> avec data <code>test: true</code>). Vérifiez la réception côté dashboard.</p></div>
             <?php endif; ?>
 
             <h2>Clé API</h2>
@@ -134,6 +166,50 @@ final class SettingsPage
                 </table>
                 <p class="submit"><button type="submit" class="button button-primary">Enregistrer</button></p>
             </form>
+
+            <h2>Webhooks sortants (temps réel)</h2>
+            <p class="description">
+                Quand un événement se produit (dossier créé, renouvelé, etc.), iptv-connect POST automatiquement vers
+                l'URL configurée avec une signature HMAC SHA-256. Plus rapide que le polling 60 s du dashboard.
+            </p>
+            <?php $wh_url = (string) get_option(\IptvConnect\Webhooks\WebhookDispatcher::OPT_URL, ''); ?>
+            <?php $wh_secret = (string) get_option(\IptvConnect\Webhooks\WebhookDispatcher::OPT_SECRET, ''); ?>
+            <form method="post">
+                <?php wp_nonce_field(self::NONCE_ROTATE); ?>
+                <input type="hidden" name="iptv_connect_action" value="save_webhooks">
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label for="webhook_url">URL réceptrice</label></th>
+                        <td>
+                            <input type="url" id="webhook_url" name="webhook_url" class="regular-text" value="<?php echo esc_attr($wh_url); ?>" placeholder="https://iptv-admin.vercel.app/api/wh/wp">
+                            <p class="description">Endpoint du dashboard qui reçoit les events. Laisser vide pour désactiver.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="webhook_secret">Secret HMAC</label></th>
+                        <td>
+                            <input type="text" id="webhook_secret" name="webhook_secret" class="regular-text" value="<?php echo esc_attr($wh_secret); ?>" placeholder="(secret partagé)">
+                            <p class="description">Doit être identique à <code>WEBHOOK_SECRET</code> côté dashboard.</p>
+                        </td>
+                    </tr>
+                </table>
+                <p class="submit">
+                    <button type="submit" class="button button-primary">Enregistrer webhooks</button>
+                </p>
+            </form>
+
+            <p>
+                <form method="post" style="display:inline-block; margin-right:8px;" onsubmit="return confirm('Générer un nouveau secret ? L\'ancien sera invalidé.');">
+                    <?php wp_nonce_field(self::NONCE_ROTATE); ?>
+                    <input type="hidden" name="iptv_connect_action" value="rotate_webhook_secret">
+                    <button type="submit" class="button button-secondary">🔄 Régénérer le secret</button>
+                </form>
+                <form method="post" style="display:inline-block;">
+                    <?php wp_nonce_field(self::NONCE_ROTATE); ?>
+                    <input type="hidden" name="iptv_connect_action" value="test_webhook">
+                    <button type="submit" class="button button-secondary" <?php disabled($wh_url === '' || $wh_secret === ''); ?>>🧪 Envoyer un test</button>
+                </form>
+            </p>
 
             <h2>Informations</h2>
             <table class="form-table" role="presentation">
