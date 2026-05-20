@@ -1,0 +1,14 @@
+{
+    "name": "tycabane/iptv-connect-wp",
+    "description": "WordPress plugin connector — exposes dossiers + clients + KPI via secure REST API for the central IPTV admin dashboard.",
+    "type": "wordpress-plugin",
+    "license": "proprietary",
+    "require": {
+        "php": ">=8.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "IptvConnect\\": "src/"
+        }
+    }
+}

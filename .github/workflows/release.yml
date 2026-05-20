@@ -1,0 +1,51 @@
+name: Build & Release plugin .zip
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync plugin header version (sanity)
+        run: |
+          if ! grep -q "Version: ${{ steps.ver.outputs.version }}" iptv-connect.php; then
+            echo "::warning::Plugin header version differs from tag ${{ steps.ver.outputs.version }}"
+          fi
+
+      - name: Build zip
+        run: |
+          mkdir -p build/iptv-connect
+          rsync -a \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='.gitignore' \
+            --exclude='*.zip' \
+            --exclude='node_modules' \
+            --exclude='tests' \
+            --exclude='.idea' \
+            --exclude='.vscode' \
+            ./ build/iptv-connect/
+          cd build && zip -r ../iptv-connect.zip iptv-connect
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: iptv-connect.zip
