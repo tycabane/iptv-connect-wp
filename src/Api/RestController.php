@@ -15,6 +15,7 @@ use IptvConnect\Api\Endpoints\EmailTemplatesEndpoint;
 use IptvConnect\Api\Endpoints\HealthEndpoint;
 use IptvConnect\Api\Endpoints\KpisEndpoint;
 use IptvConnect\Api\Endpoints\PanelsEndpoint;
+use IptvConnect\Api\Endpoints\UrlHealthEndpoint;
 use IptvConnect\Auth\BearerToken;
 
 /**
@@ -159,6 +160,18 @@ final class RestController
                 'callback'            => [EmailTemplatesEndpoint::class, 'save'],
                 'permission_callback' => $auth,
             ],
+        ]);
+
+        // ─── URL Monitor (santé des hosts IPTV) ───
+        register_rest_route(self::NAMESPACE, '/url-health', [
+            'methods'             => 'GET',
+            'callback'            => [UrlHealthEndpoint::class, 'list'],
+            'permission_callback' => $auth,
+        ]);
+        register_rest_route(self::NAMESPACE, '/url-health/check', [
+            'methods'             => 'POST',
+            'callback'            => [UrlHealthEndpoint::class, 'triggerCheck'],
+            'permission_callback' => $auth,
         ]);
 
         // ─── Cron renouvellement ───

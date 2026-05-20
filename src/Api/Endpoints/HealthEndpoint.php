@@ -84,6 +84,10 @@ final class HealthEndpoint
                 'panels.read',
                 'audit-log.read'
             );
+            // URL Monitor (iptv-core v0.3+ requis)
+            if (class_exists('\\IptvCore\\UrlMonitor\\Service')) {
+                array_push($caps, 'url-health.read', 'url-health.check');
+            }
         }
 
         return $caps;

@@ -50,6 +50,10 @@ final class WebhookDispatcher
         'iptv_connect/dossier.provisioned'     => 'dossier.provisioned',
         'iptv_connect/dossier.host_migrated'   => 'dossier.host_migrated',
         'iptv_connect/credentials.rotated'     => 'credentials.rotated',
+        // Events iptv-core (URL monitor) — forwardés vers le dashboard pour notif
+        'iptv_core/url.down'                   => 'url.down',
+        'iptv_core/url.recovered'              => 'url.recovered',
+        'iptv_core/host.auto_migrated'         => 'host.auto_migrated',
     ];
 
     public static function register(): void
@@ -190,6 +194,26 @@ final class WebhookDispatcher
                 return [
                     'dossier_id' => (int) ($args[0] ?? 0),
                     'field'      => (string) ($args[1] ?? ''),
+                ];
+
+            case 'url.down':
+                // do_action('iptv_core/url.down', $host, $details)
+                return [
+                    'host'    => (string) ($args[0] ?? ''),
+                    'details' => is_array($args[1] ?? null) ? $args[1] : null,
+                ];
+
+            case 'url.recovered':
+                // do_action('iptv_core/url.recovered', $host)
+                return ['host' => (string) ($args[0] ?? '')];
+
+            case 'host.auto_migrated':
+                // do_action('iptv_core/host.auto_migrated', $oldHost, $newHost, $dossierIds)
+                return [
+                    'old_host'    => (string) ($args[0] ?? ''),
+                    'new_host'    => (string) ($args[1] ?? ''),
+                    'dossier_ids' => is_array($args[2] ?? null) ? array_map('intval', $args[2]) : [],
+                    'count'       => is_array($args[2] ?? null) ? count($args[2]) : 0,
                 ];
 
             default:
