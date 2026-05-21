@@ -37,6 +37,7 @@ final class NewPanelConfigEndpoint
     public const OPT_DEFAULT_TEMPLATE = 'iptv_newpanel_default_template_id';
     public const OPT_DEFAULT_DOMAIN   = 'iptv_newpanel_default_domain_id';
     public const OPT_CREDIT_THRESHOLD = 'iptv_newpanel_credit_alert_threshold';
+    public const OPT_SIMULATION_MODE  = 'iptv_newpanel_simulation_mode';
     public const OPT_LAST_PUSHED_AT   = 'iptv_newpanel_config_last_pushed_at';
     public const OPT_LAST_PUSHED_BY   = 'iptv_newpanel_config_last_pushed_by';
 
@@ -66,6 +67,7 @@ final class NewPanelConfigEndpoint
             'default_template_id'    => (int) get_option(self::OPT_DEFAULT_TEMPLATE, 0),
             'default_domain_id'      => (int) get_option(self::OPT_DEFAULT_DOMAIN, 0),
             'credit_alert_threshold' => (int) get_option(self::OPT_CREDIT_THRESHOLD, 2),
+            'simulation_mode'        => (bool) get_option(self::OPT_SIMULATION_MODE, false),
             'last_pushed_at'         => (string) get_option(self::OPT_LAST_PUSHED_AT, ''),
             'last_pushed_by'         => (string) get_option(self::OPT_LAST_PUSHED_BY, ''),
         ], 200);
@@ -97,6 +99,7 @@ final class NewPanelConfigEndpoint
             'default_template_id'    => (int) get_option(self::OPT_DEFAULT_TEMPLATE, 0),
             'default_domain_id'      => (int) get_option(self::OPT_DEFAULT_DOMAIN, 0),
             'credit_alert_threshold' => (int) get_option(self::OPT_CREDIT_THRESHOLD, 2),
+            'simulation_mode'        => (bool) get_option(self::OPT_SIMULATION_MODE, false),
         ];
 
         $changes = [];
@@ -144,6 +147,11 @@ final class NewPanelConfigEndpoint
             update_option(self::OPT_CREDIT_THRESHOLD, $val);
             if ($val !== $before['credit_alert_threshold']) $changes[] = 'credit_alert_threshold';
         }
+        if (array_key_exists('simulation_mode', $body)) {
+            $val = (bool) $body['simulation_mode'];
+            update_option(self::OPT_SIMULATION_MODE, $val);
+            if ($val !== $before['simulation_mode']) $changes[] = 'simulation_mode';
+        }
 
         // Audit (toujours mis à jour, même si rien n'a vraiment changé : trace de la tentative)
         update_option(self::OPT_LAST_PUSHED_AT, gmdate('c'));
@@ -167,6 +175,7 @@ final class NewPanelConfigEndpoint
             'default_template_id'    => (int) get_option(self::OPT_DEFAULT_TEMPLATE, 0),
             'default_domain_id'      => (int) get_option(self::OPT_DEFAULT_DOMAIN, 0),
             'credit_alert_threshold' => (int) get_option(self::OPT_CREDIT_THRESHOLD, 2),
+            'simulation_mode'        => (bool) get_option(self::OPT_SIMULATION_MODE, false),
         ];
 
         $message = empty($changes)

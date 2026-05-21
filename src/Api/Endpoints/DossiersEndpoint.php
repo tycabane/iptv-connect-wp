@@ -565,6 +565,7 @@ final class DossiersEndpoint
             'wc_order_id'    => (int)    get_post_meta($id, '_iptv_wc_order_id', true),
             'newpanel_line'  => (int)    get_post_meta($id, '_iptv_newpanel_line_id', true),
             'newpanel_managed' => (int) get_post_meta($id, '_iptv_newpanel_managed', true) === 1,
+            'simulated'      => (int)   get_post_meta($id, '_iptv_simulated', true) === 1,
         ];
 
         if ($include_creds && class_exists('IptvCore\\Security\\DossierCreds') && class_exists('IptvCore\\Security\\CredsVault')) {
