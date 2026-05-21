@@ -11,6 +11,7 @@ use IptvConnect\Admin\SettingsPage;
 use IptvConnect\Api\RestController;
 use IptvConnect\Updater\GitHubUpdater;
 use IptvConnect\Webhooks\WebhookDispatcher;
+use IptvConnect\Registration\AutoRegister;
 
 /**
  * Bootstrap — point d'entrée du plugin. Enregistre tous les hooks WP.
@@ -43,6 +44,7 @@ final class Bootstrap
 
     /**
      * Activation : génère une clé API si pas déjà présente + horodatage.
+     * Auto-register le site sur le dashboard externe (si URL+secret configurés).
      */
     public static function activate(): void
     {
@@ -54,6 +56,9 @@ final class Bootstrap
         }
         // Flush rewrite rules pour que les endpoints /wp-json/iptv-connect/v1/* répondent
         flush_rewrite_rules();
+
+        // Auto-registration sur le dashboard (best-effort, no-op si pas configuré)
+        AutoRegister::register();
     }
 
     public static function deactivate(): void

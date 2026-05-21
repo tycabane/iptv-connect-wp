@@ -9,6 +9,7 @@ namespace IptvConnect\Admin;
 
 use IptvConnect\Bootstrap;
 use IptvConnect\Webhooks\WebhookDispatcher;
+use IptvConnect\Registration\AutoRegister;
 
 /**
  * SettingsPage — page admin "🔌 Dashboard Connect"
@@ -79,6 +80,23 @@ final class SettingsPage
             wp_safe_redirect(add_query_arg(['webhook_tested' => '1'], admin_url('options-general.php?page=' . self::PAGE_SLUG)));
             exit;
         }
+
+        if ($action === 'save_registration' && check_admin_referer(self::NONCE_ROTATE)) {
+            $url    = esc_url_raw((string) ($_POST['registration_url'] ?? ''));
+            $secret = trim((string) ($_POST['registration_secret'] ?? ''));
+            if ($url) update_option(AutoRegister::OPT_URL, rtrim($url, '/'), false);
+            if ($secret) update_option(AutoRegister::OPT_SECRET, $secret, false);
+            wp_safe_redirect(add_query_arg(['registration_saved' => '1'], admin_url('options-general.php?page=' . self::PAGE_SLUG)));
+            exit;
+        }
+
+        if ($action === 'register_now' && check_admin_referer(self::NONCE_ROTATE)) {
+            $result = AutoRegister::register();
+            $args = ['register_done' => $result['ok'] ? '1' : '0'];
+            if (!$result['ok']) $args['register_error'] = urlencode($result['message'] ?? '');
+            wp_safe_redirect(add_query_arg($args, admin_url('options-general.php?page=' . self::PAGE_SLUG)));
+            exit;
+        }
     }
 
     public static function render(): void
@@ -108,6 +126,16 @@ final class SettingsPage
             <?php endif; ?>
             <?php if (!empty($_GET['webhook_tested'])): ?>
                 <div class="notice notice-info is-dismissible"><p>Webhook de test envoyé (event <code>dossier.created</code> avec data <code>test: true</code>). Vérifiez la réception côté dashboard.</p></div>
+            <?php endif; ?>
+            <?php if (!empty($_GET['registration_saved'])): ?>
+                <div class="notice notice-success is-dismissible"><p>Configuration enregistrement dashboard sauvée.</p></div>
+            <?php endif; ?>
+            <?php if (isset($_GET['register_done'])): ?>
+                <?php if ($_GET['register_done'] === '1'): ?>
+                    <div class="notice notice-success is-dismissible"><p>✅ Site enregistré sur le dashboard avec succès.</p></div>
+                <?php else: ?>
+                    <div class="notice notice-error is-dismissible"><p>❌ Échec : <?php echo esc_html((string) ($_GET['register_error'] ?? '')); ?></p></div>
+                <?php endif; ?>
             <?php endif; ?>
 
             <h2>Clé API</h2>
@@ -166,6 +194,69 @@ final class SettingsPage
                 </table>
                 <p class="submit"><button type="submit" class="button button-primary">Enregistrer</button></p>
             </form>
+
+            <h2>📡 Enregistrement automatique sur le dashboard</h2>
+            <?php $reg_url = AutoRegister::dashboardUrl(); ?>
+            <?php $reg_secret = AutoRegister::registrationSecret(); ?>
+            <?php $reg_last = AutoRegister::getLastResult(); ?>
+            <p class="description">
+                À l'activation du plugin, le site s'enregistre <strong>automatiquement</strong> dans le dashboard externe
+                via un POST signé HMAC vers <code>/api/sites/register</code>. Vous pouvez aussi déclencher manuellement.
+            </p>
+            <form method="post">
+                <?php wp_nonce_field(self::NONCE_ROTATE); ?>
+                <input type="hidden" name="iptv_connect_action" value="save_registration">
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th scope="row"><label for="registration_url">URL du dashboard</label></th>
+                        <td>
+                            <input type="url" id="registration_url" name="registration_url" class="regular-text" value="<?php echo esc_attr($reg_url); ?>" placeholder="https://iptv-admin-pied.vercel.app" <?php disabled(defined(AutoRegister::URL_CONSTANT)); ?>>
+                            <?php if (defined(AutoRegister::URL_CONSTANT)): ?>
+                                <p class="description">Lu depuis la constante <code>IPTV_DASHBOARD_URL</code> (wp-config.php) — non modifiable ici.</p>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th scope="row"><label for="registration_secret">Secret HMAC d'enregistrement</label></th>
+                        <td>
+                            <input type="text" id="registration_secret" name="registration_secret" class="regular-text" value="<?php echo esc_attr($reg_secret); ?>" placeholder="(64 chars hex, partagé avec le dashboard)" <?php disabled(defined(AutoRegister::SECRET_CONSTANT)); ?>>
+                            <?php if (defined(AutoRegister::SECRET_CONSTANT)): ?>
+                                <p class="description">Lu depuis la constante <code>IPTV_REGISTRATION_SECRET</code> (wp-config.php) — non modifiable ici.</p>
+                            <?php else: ?>
+                                <p class="description">Doit être identique à <code>REGISTRATION_SECRET</code> côté dashboard. Recommandé : stocker plutôt dans <code>wp-config.php</code> pour sécurité.</p>
+                            <?php endif; ?>
+                        </td>
+                    </tr>
+                </table>
+                <p class="submit"><button type="submit" class="button button-primary">Enregistrer config</button></p>
+            </form>
+            <p>
+                <form method="post" style="display:inline-block;">
+                    <?php wp_nonce_field(self::NONCE_ROTATE); ?>
+                    <input type="hidden" name="iptv_connect_action" value="register_now">
+                    <button type="submit" class="button button-secondary" <?php disabled($reg_url === '' || $reg_secret === ''); ?>>📡 Synchroniser maintenant avec le dashboard</button>
+                </form>
+            </p>
+            <?php if ($reg_last): ?>
+                <table class="form-table" role="presentation">
+                    <tr>
+                        <th>Dernier enregistrement</th>
+                        <td>
+                            <strong style="color: <?php echo !empty($reg_last['ok']) ? '#2e7d32' : '#c62828'; ?>;">
+                                <?php echo !empty($reg_last['ok']) ? '✅ Succès' : '❌ Échec'; ?>
+                            </strong>
+                            <?php if (!empty($reg_last['site_id'])): ?>
+                                · Site ID <code>#<?php echo (int) $reg_last['site_id']; ?></code>
+                                <?php if (!empty($reg_last['action'])): ?> (action : <em><?php echo esc_html((string) $reg_last['action']); ?></em>)<?php endif; ?>
+                            <?php endif; ?>
+                            <br>
+                            <span class="description"><?php echo esc_html((string) ($reg_last['message'] ?? '')); ?></span>
+                            <br>
+                            <small><?php echo esc_html((string) ($reg_last['at'] ?? '')); ?></small>
+                        </td>
+                    </tr>
+                </table>
+            <?php endif; ?>
 
             <h2>Webhooks sortants (temps réel)</h2>
             <p class="description">
