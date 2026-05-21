@@ -383,6 +383,18 @@ final class DossiersEndpoint
             );
         }
 
+        // Sync commande WC → "Completed" (l'activation marque la livraison de l'abonnement)
+        if (class_exists('\\IptvCore\\Admin\\Cockpit\\AjaxHandlers')) {
+            try {
+                \IptvCore\Admin\Cockpit\AjaxHandlers::syncWcOrderToCompleted(
+                    $id,
+                    sprintf('saisie manuelle · host=%s', $host)
+                );
+            } catch (\Throwable $e) {
+                error_log('[iptv-connect] activate-manual: WC sync failed: ' . $e->getMessage());
+            }
+        }
+
         IptvCoreBridge::audit('ACTIVATE_MANUAL', 'dossier', $id, [
             'host'      => $host,
             'from_m3u'  => $m3u_url !== '',
