@@ -117,6 +117,12 @@ final class RestController
             'permission_callback' => $auth,
         ]);
 
+        register_rest_route(self::NAMESPACE, '/dossiers/(?P<id>\d+)/activate-manual', [
+            'methods'             => 'POST',
+            'callback'            => [DossiersEndpoint::class, 'activateManual'],
+            'permission_callback' => $auth,
+        ]);
+
         // ─── Clients ───
         register_rest_route(self::NAMESPACE, '/clients', [
             'methods'             => 'GET',

@@ -285,6 +285,147 @@ final class DossiersEndpoint
     }
 
     /**
+     * POST /dossiers/{id}/activate-manual
+     *
+     * Active un dossier avec des identifiants saisis manuellement (sans passer par
+     * l'API NewPanel). Utile pour les comptes hébergés sur Golden, Smartplus, ou
+     * tout panel sans API.
+     *
+     * Body JSON (2 formes acceptées) :
+     *   A) { m3u_url: "http://host:port/get.php?username=USER&password=PASS&type=m3u_plus" }
+     *      → host/user/pwd dérivés automatiquement côté serveur
+     *
+     *   B) { host: string, user: string, pwd: string, url?: string, port?: string }
+     *      → champs fournis explicitement (mode avancé)
+     *
+     * Effets :
+     *   - chiffre les credentials via libsodium (DossierCreds)
+     *   - met _iptv_statut = "actif"
+     *   - envoie l'email "actif" au client (StatusNotifier)
+     *   - _iptv_newpanel_managed reste à 0 (= non géré par notre API)
+     */
+    public static function activateManual(WP_REST_Request $request)
+    {
+        if (($err = IptvCoreBridge::requireOrError()) !== true) return $err;
+        $id   = (int) $request->get_param('id');
+        $body = (array) $request->get_json_params();
+
+        $post = get_post($id);
+        if (!$post || $post->post_type !== 'iptv_dossier') {
+            return new WP_Error('iptv_connect_not_found', 'Dossier introuvable', ['status' => 404]);
+        }
+
+        $creds_svc = IptvCoreBridge::creds();
+        if (!$creds_svc) {
+            return new WP_Error('iptv_connect_no_vault', 'CredsVault indisponible (IPTV_MASTER_KEY manquant ?).', ['status' => 503]);
+        }
+
+        // Parser le M3U si fourni
+        $m3u_url = trim((string) ($body['m3u_url'] ?? ''));
+        $parsed = [];
+        if ($m3u_url !== '') {
+            $parsed = self::parseM3uUrl($m3u_url);
+            if ($parsed === null) {
+                return new WP_Error(
+                    'iptv_connect_bad_m3u',
+                    'URL M3U invalide ou non-Xtream. Attendu : http://host:port/get.php?username=...&password=...',
+                    ['status' => 400]
+                );
+            }
+            $parsed['url'] = $m3u_url; // garde l'URL complète pour l'email client
+        }
+
+        // Merger explicit (body) > parsed (m3u_url)
+        $host = trim((string) ($body['host'] ?? $parsed['host'] ?? ''));
+        $user = trim((string) ($body['user'] ?? $parsed['user'] ?? ''));
+        $pwd  = trim((string) ($body['pwd']  ?? $parsed['pwd']  ?? ''));
+        $url  = trim((string) ($body['url']  ?? $parsed['url']  ?? ''));
+        $port = trim((string) ($body['port'] ?? $parsed['port'] ?? ''));
+
+        if ($host === '' || $user === '' || $pwd === '') {
+            return new WP_Error(
+                'iptv_connect_missing_creds',
+                'host, user et pwd sont requis (soit via m3u_url, soit en clair).',
+                ['status' => 400]
+            );
+        }
+
+        try {
+            $creds_svc->set($id, 'host', $host);
+            $creds_svc->set($id, 'user', $user);
+            $creds_svc->set($id, 'pwd',  $pwd);
+            if ($url  !== '') $creds_svc->set($id, 'url',  $url);
+            if ($port !== '') $creds_svc->set($id, 'port', $port);
+        } catch (\Throwable $e) {
+            return new WP_Error('iptv_connect_creds_failed', $e->getMessage(), ['status' => 500]);
+        }
+
+        // Statut → actif
+        update_post_meta($id, '_iptv_statut', 'actif');
+        // Marqueur explicite : ce dossier n'est PAS managé par NewPanel
+        update_post_meta($id, '_iptv_newpanel_managed', 0);
+
+        // Email client avec ses credentials (template iptv-core)
+        if (class_exists('\\IptvCore\\Email\\StatusNotifier')) {
+            try {
+                \IptvCore\Email\StatusNotifier::send($id, 'actif');
+            } catch (\Throwable $e) {
+                // best-effort ; on log mais on ne bloque pas l'activation
+                error_log('[iptv-connect] activate-manual: email client failed: ' . $e->getMessage());
+            }
+        }
+
+        // History log si dispo
+        if (class_exists('\\IptvCore\\Domain\\HistoryLogger')) {
+            \IptvCore\Domain\HistoryLogger::log(
+                $id,
+                sprintf('✏️ Activation manuelle (saisie admin) · host=%s · user=%s', $host, $user)
+            );
+        }
+
+        IptvCoreBridge::audit('ACTIVATE_MANUAL', 'dossier', $id, [
+            'host'      => $host,
+            'from_m3u'  => $m3u_url !== '',
+        ]);
+        do_action('iptv_connect/dossier.activated_manual', $id, ['host' => $host, 'user' => $user]);
+
+        return new WP_REST_Response([
+            'ok'     => true,
+            'id'     => $id,
+            'host'   => $host,
+            'user'   => $user,
+            'statut' => 'actif',
+            'message' => 'Dossier activé (manuel) · email client envoyé.',
+        ], 200);
+    }
+
+    /**
+     * Parse une URL M3U Xtream et extrait host/user/pwd/port.
+     * Retourne null si format invalide.
+     *
+     * Format attendu : http(s)://host[:port]/get.php?username=USER&password=PASS[&type=m3u_plus]
+     *
+     * @return array{host:string,user:string,pwd:string,port:string}|null
+     */
+    private static function parseM3uUrl(string $raw): ?array
+    {
+        $parts = @parse_url($raw);
+        if (!is_array($parts) || empty($parts['host']) || empty($parts['query'])) {
+            return null;
+        }
+        parse_str($parts['query'], $qs);
+        $user = (string) ($qs['username'] ?? '');
+        $pwd  = (string) ($qs['password'] ?? '');
+        if ($user === '' || $pwd === '') return null;
+
+        $scheme = (string) ($parts['scheme'] ?? 'http');
+        $port   = isset($parts['port']) ? (string) $parts['port'] : '';
+        $host   = $scheme . '://' . $parts['host'] . ($port !== '' ? ':' . $port : '');
+
+        return ['host' => $host, 'user' => $user, 'pwd' => $pwd, 'port' => $port];
+    }
+
+    /**
      * POST /dossiers/{id}/credentials/rotate
      * Body : { field: host|port|user|pwd|url, value: string }
      */
