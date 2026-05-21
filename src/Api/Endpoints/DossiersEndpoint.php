@@ -196,9 +196,18 @@ final class DossiersEndpoint
             return new WP_Error('iptv_connect_renew_exception', $e->getMessage(), ['status' => 500]);
         }
 
-        $status = !empty($result['ok']) ? 200 : 422;
-        IptvCoreBridge::audit('RENEW_DOSSIER', 'dossier', $id, ['months' => $months, 'ok' => !empty($result['ok'])]);
-        do_action('iptv_connect/dossier.renewed', $id, $months, $result);
+        $ok = !empty($result['ok']);
+        $status = $ok ? 200 : 422;
+        IptvCoreBridge::audit('RENEW_DOSSIER', 'dossier', $id, ['months' => $months, 'ok' => $ok]);
+
+        // Hooks conditionnels : ne pas tirer `dossier.renewed` (= succès, écoute Telegram)
+        // si l'API a refusé l'opération. Sinon les abonnés (notifications, etc.) annoncent
+        // un renouvellement qui n'a jamais eu lieu.
+        if ($ok) {
+            do_action('iptv_connect/dossier.renewed', $id, $months, $result);
+        } else {
+            do_action('iptv_connect/dossier.renew_failed', $id, $months, $result);
+        }
         return new WP_REST_Response($result, $status);
     }
 
@@ -220,9 +229,16 @@ final class DossiersEndpoint
             return new WP_Error('iptv_connect_provision_exception', $e->getMessage(), ['status' => 500]);
         }
 
-        $status = !empty($result['ok']) ? 200 : 422;
-        IptvCoreBridge::audit('PROVISION_DOSSIER', 'dossier', $id, ['ok' => !empty($result['ok'])]);
-        do_action('iptv_connect/dossier.provisioned', $id, $result);
+        $ok = !empty($result['ok']);
+        $status = $ok ? 200 : 422;
+        IptvCoreBridge::audit('PROVISION_DOSSIER', 'dossier', $id, ['ok' => $ok]);
+
+        // Hooks conditionnels (cf. renew() ci-dessus)
+        if ($ok) {
+            do_action('iptv_connect/dossier.provisioned', $id, $result);
+        } else {
+            do_action('iptv_connect/dossier.provision_failed', $id, $result);
+        }
         return new WP_REST_Response($result, $status);
     }
 
