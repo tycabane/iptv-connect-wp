@@ -91,12 +91,19 @@ final class NewPanelConfigEndpoint
             return new WP_Error('iptv_connect_bad_body', 'Body JSON invalide', ['status' => 400]);
         }
 
+        // Snapshot AVANT modification (pour calculer les vraies diffs)
+        $before = [
+            'mapping'                 => (array) get_option(self::OPT_MAPPING, []),
+            'default_template_id'    => (int) get_option(self::OPT_DEFAULT_TEMPLATE, 0),
+            'default_domain_id'      => (int) get_option(self::OPT_DEFAULT_DOMAIN, 0),
+            'credit_alert_threshold' => (int) get_option(self::OPT_CREDIT_THRESHOLD, 2),
+        ];
+
         $changes = [];
 
         // API key (seulement si fournie ET pas de constante prioritaire)
         if (isset($body['api_key']) && is_string($body['api_key']) && $body['api_key'] !== '') {
             if (defined('IPTV_NEWPANEL_API_KEY') && !empty(IPTV_NEWPANEL_API_KEY)) {
-                // Constante prioritaire : on n'écrase pas, mais on signale
                 $changes[] = 'api_key_skipped_constant_defined';
             } else {
                 update_option(self::OPT_API_KEY, sanitize_text_field((string) $body['api_key']));
@@ -104,7 +111,8 @@ final class NewPanelConfigEndpoint
             }
         }
 
-        // Mapping
+        // Mapping — sauvegarde + diff réel
+        $new_mapping = null;
         if (isset($body['mapping']) && is_array($body['mapping'])) {
             $clean = [];
             foreach (['1m', '3m', '6m', '12m', '24m'] as $key) {
@@ -113,24 +121,31 @@ final class NewPanelConfigEndpoint
                 }
             }
             update_option(self::OPT_MAPPING, $clean);
-            $changes[] = 'mapping';
+            $new_mapping = $clean;
+            // Diff réel : compare clé par clé
+            if (self::mappingDiffers($before['mapping'], $clean)) {
+                $changes[] = 'mapping';
+            }
         }
 
-        // Defaults
+        // Defaults (avec diff réel)
         if (isset($body['default_template_id'])) {
-            update_option(self::OPT_DEFAULT_TEMPLATE, max(0, (int) $body['default_template_id']));
-            $changes[] = 'default_template_id';
+            $val = max(0, (int) $body['default_template_id']);
+            update_option(self::OPT_DEFAULT_TEMPLATE, $val);
+            if ($val !== $before['default_template_id']) $changes[] = 'default_template_id';
         }
         if (isset($body['default_domain_id'])) {
-            update_option(self::OPT_DEFAULT_DOMAIN, max(0, (int) $body['default_domain_id']));
-            $changes[] = 'default_domain_id';
+            $val = max(0, (int) $body['default_domain_id']);
+            update_option(self::OPT_DEFAULT_DOMAIN, $val);
+            if ($val !== $before['default_domain_id']) $changes[] = 'default_domain_id';
         }
         if (isset($body['credit_alert_threshold'])) {
-            update_option(self::OPT_CREDIT_THRESHOLD, max(0, (int) $body['credit_alert_threshold']));
-            $changes[] = 'credit_alert_threshold';
+            $val = max(0, (int) $body['credit_alert_threshold']);
+            update_option(self::OPT_CREDIT_THRESHOLD, $val);
+            if ($val !== $before['credit_alert_threshold']) $changes[] = 'credit_alert_threshold';
         }
 
-        // Audit
+        // Audit (toujours mis à jour, même si rien n'a vraiment changé : trace de la tentative)
         update_option(self::OPT_LAST_PUSHED_AT, gmdate('c'));
         $pushed_by = isset($body['pushed_by']) && is_string($body['pushed_by'])
             ? sanitize_text_field($body['pushed_by'])
@@ -145,10 +160,38 @@ final class NewPanelConfigEndpoint
             'pushed_by' => $pushed_by,
         ]);
 
+        // État APRÈS : renvoyé dans la réponse pour que le client puisse vérifier
+        // exactement ce qui est en BD (anti-faux-positif).
+        $after = [
+            'mapping'                 => (array) get_option(self::OPT_MAPPING, []),
+            'default_template_id'    => (int) get_option(self::OPT_DEFAULT_TEMPLATE, 0),
+            'default_domain_id'      => (int) get_option(self::OPT_DEFAULT_DOMAIN, 0),
+            'credit_alert_threshold' => (int) get_option(self::OPT_CREDIT_THRESHOLD, 2),
+        ];
+
+        $message = empty($changes)
+            ? 'Aucune modification détectée — les valeurs sont identiques à celles déjà en base.'
+            : sprintf('Config NewPanel mise à jour (%d champ%s : %s)', count($changes), count($changes) > 1 ? 's' : '', implode(', ', $changes));
+
         return new WP_REST_Response([
-            'ok'      => true,
-            'changes' => $changes,
-            'message' => sprintf('Config NewPanel mise à jour (%d champs)', count($changes)),
+            'ok'         => true,
+            'changes'    => $changes,
+            'message'    => $message,
+            'persisted'  => $after, // ← preuve : ce qui est vraiment en BD maintenant
         ], 200);
+    }
+
+    /**
+     * Compare deux mappings clé par clé. Retourne true si différent.
+     */
+    private static function mappingDiffers(array $a, array $b): bool
+    {
+        $keys = ['1m', '3m', '6m', '12m', '24m'];
+        foreach ($keys as $k) {
+            $va = isset($a[$k]) ? (int) $a[$k] : 0;
+            $vb = isset($b[$k]) ? (int) $b[$k] : 0;
+            if ($va !== $vb) return true;
+        }
+        return false;
     }
 }
