@@ -8,6 +8,7 @@ declare(strict_types=1);
 namespace IptvConnect\Api;
 
 use IptvConnect\Api\Endpoints\AuditLogEndpoint;
+use IptvConnect\Api\Endpoints\CacheEndpoint;
 use IptvConnect\Api\Endpoints\ClientsEndpoint;
 use IptvConnect\Api\Endpoints\CronEndpoint;
 use IptvConnect\Api\Endpoints\DossiersEndpoint;
@@ -120,6 +121,13 @@ final class RestController
         register_rest_route(self::NAMESPACE, '/dossiers/(?P<id>\d+)/activate-manual', [
             'methods'             => 'POST',
             'callback'            => [DossiersEndpoint::class, 'activateManual'],
+            'permission_callback' => $auth,
+        ]);
+
+        // ─── Cache OPcache (admin maintenance) ───
+        register_rest_route(self::NAMESPACE, '/cache/clear', [
+            'methods'             => 'POST',
+            'callback'            => [CacheEndpoint::class, 'clear'],
             'permission_callback' => $auth,
         ]);
 
