@@ -16,6 +16,7 @@ use IptvConnect\Api\Endpoints\HealthEndpoint;
 use IptvConnect\Api\Endpoints\KpisEndpoint;
 use IptvConnect\Api\Endpoints\PanelsEndpoint;
 use IptvConnect\Api\Endpoints\UrlHealthEndpoint;
+use IptvConnect\Api\Endpoints\NewPanelConfigEndpoint;
 use IptvConnect\Auth\BearerToken;
 
 /**
@@ -163,6 +164,25 @@ final class RestController
             [
                 'methods'             => 'PUT,PATCH',
                 'callback'            => [EmailTemplatesEndpoint::class, 'save'],
+                'permission_callback' => $auth,
+            ],
+        ]);
+
+        // ─── Config NewPanel (centralisée par le dashboard) ───
+        register_rest_route(self::NAMESPACE, '/config/newpanel', [
+            [
+                'methods'             => 'GET',
+                'callback'            => [NewPanelConfigEndpoint::class, 'get'],
+                'permission_callback' => $auth,
+            ],
+            [
+                'methods'             => 'PUT',
+                'callback'            => [NewPanelConfigEndpoint::class, 'put'],
+                'permission_callback' => $auth,
+            ],
+            [
+                'methods'             => 'POST',  // alias PUT pour clients qui n'ont pas PUT
+                'callback'            => [NewPanelConfigEndpoint::class, 'put'],
                 'permission_callback' => $auth,
             ],
         ]);
