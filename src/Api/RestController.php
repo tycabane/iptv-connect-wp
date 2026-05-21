@@ -127,6 +127,11 @@ final class RestController
                 'search'   => ['type' => 'string',  'default' => ''],
             ],
         ]);
+        register_rest_route(self::NAMESPACE, '/clients/(?P<id>\d+)/journey', [
+            'methods'             => 'GET',
+            'callback'            => [ClientsEndpoint::class, 'journey'],
+            'permission_callback' => $auth,
+        ]);
 
         // ─── Panels IPTV (agrégé) ───
         register_rest_route(self::NAMESPACE, '/panels', [

@@ -60,6 +60,7 @@ final class HealthEndpoint
             'kpis',
             'sync.incremental',          // ?since=ISO8601 supporté en v0.3+
             'clients.read',
+            'clients.journey',
             'email-templates.read',
             'email-templates.write',
             'cron.renewal.read',
