@@ -157,22 +157,28 @@ final class DossiersEndpoint
     /**
      * DELETE /dossiers/{id}
      *
-     * Suppression complète d'un dossier IPTV — propagée sur tous les placements :
-     *   1. Refund ligne NewPanel (si managed + line_id valide + pas en simu)
-     *      → libère le crédit côté API
-     *   2. Annule la commande WooCommerce associée (status → cancelled)
-     *      → cohérence du back-office WC
-     *   3. wp_delete_post(force=true) → supprime le post iptv_dossier + cascade
-     *      automatique de toutes les post_meta (creds chiffrés, history, audit,
-     *      mode_paiement, renewal flags, etc.)
-     *   4. Le dossier disparaît automatiquement de :
-     *      - Cockpit page /dossiers (liste)
-     *      - Cockpit page /a-traiter (filtre par statut)
-     *      - Cockpit page dossier détail (404)
-     *      - Espace client /mon-compte/ (le ctx user ne le retrouve plus)
+     * Action de suppression / cancel — granulaire via 3 flags optionnels (body JSON) :
+     *   - remove_dossier (bool, défaut TRUE)
+     *       → supprime le post iptv_dossier + ses meta (refund NewPanel + email)
+     *       → si FALSE : le dossier reste actif, seules les autres opérations
+     *         (disable_renewal_cron / trash_wc_order) sont appliquées
+     *   - disable_renewal_cron (bool, défaut FALSE)
+     *       → set _iptv_renewal_optout=1 → le cron de renouvellement skip ce dossier
+     *       → utile pour garder le service actif mais sans renouvellement auto
+     *   - trash_wc_order (bool, défaut FALSE)
+     *       → wp_trash_post(order_id) au lieu de update_status('cancelled')
+     *       → la commande va en Corbeille WC (récupérable) au lieu d'être annulée
      *
-     * Idempotence : aucun rollback si étape 1 ou 2 échoue (best-effort), mais
-     * on log et on retourne le détail au client pour audit.
+     * Sans body : comportement legacy (remove_dossier=true + cancel WC).
+     *
+     * Le dossier disparaît de :
+     *   - Cockpit /dossiers (si remove_dossier=true)
+     *   - Cron renouvellement (si disable_renewal_cron=true OU remove_dossier=true)
+     *   - WC list (si trash_wc_order=true → corbeille, sinon cancelled visible)
+     *   - Espace client (si remove_dossier=true)
+     *
+     * Idempotent : aucun rollback si une étape échoue (best-effort), retour
+     * détaillé pour audit.
      */
     public static function delete(WP_REST_Request $request)
     {
@@ -183,16 +189,33 @@ final class DossiersEndpoint
             return new WP_Error('iptv_connect_not_found', 'Dossier introuvable', ['status' => 404]);
         }
 
-        // Snapshot des refs avant suppression (le post va disparaître)
+        // Lecture des flags (body JSON optionnel)
+        $body = (array) ($request->get_json_params() ?: []);
+        $remove_dossier       = array_key_exists('remove_dossier', $body) ? (bool) $body['remove_dossier'] : true;
+        $disable_renewal_cron = (bool) ($body['disable_renewal_cron'] ?? false);
+        $trash_wc_order       = (bool) ($body['trash_wc_order'] ?? false);
+
+        // Snapshot des refs avant suppression (le post va disparaître si remove_dossier)
         $line_id      = (int) get_post_meta($id, '_iptv_newpanel_line_id', true);
         $managed      = (int) get_post_meta($id, '_iptv_newpanel_managed', true) === 1;
         $is_simulated = (int) get_post_meta($id, '_iptv_simulated', true) === 1;
         $order_id     = (int) get_post_meta($id, '_iptv_wc_order_id', true);
 
-        // 1. Refund NewPanel (best-effort)
+        // 1. Désactive le cron de renouvellement (peut se faire sans toucher au dossier)
+        $renewal_disabled = false;
+        if ($disable_renewal_cron) {
+            update_post_meta($id, '_iptv_renewal_optout', 1);
+            update_post_meta($id, '_iptv_renewal_optout_at', current_time('mysql'));
+            $renewal_disabled = true;
+            if (class_exists('\\IptvCore\\Domain\\HistoryLogger')) {
+                \IptvCore\Domain\HistoryLogger::log($id, '🚫 Renouvellement automatique désactivé (admin Cockpit).');
+            }
+        }
+
+        // 2. Refund NewPanel (seulement si on supprime le dossier)
         $newpanel_refunded = false;
         $newpanel_error    = null;
-        if ($managed && $line_id > 0 && !$is_simulated && class_exists('\\IptvCore\\Integrations\\NewPanel\\Client')) {
+        if ($remove_dossier && $managed && $line_id > 0 && !$is_simulated && class_exists('\\IptvCore\\Integrations\\NewPanel\\Client')) {
             try {
                 $res = \IptvCore\Integrations\NewPanel\Client::refundLine($line_id);
                 $newpanel_refunded = !empty($res['ok']);
@@ -205,78 +228,116 @@ final class DossiersEndpoint
             }
         }
 
-        // 2. Annule la commande WC associée
-        $wc_cancelled = false;
-        $wc_skipped_status = null;
+        // 3. Traitement commande WC : trash, cancelled, ou skip
+        $wc_action = 'skipped'; // 'trashed' | 'cancelled' | 'skipped' | 'already_X'
         if ($order_id > 0 && function_exists('wc_get_order')) {
             $order = wc_get_order($order_id);
             if ($order instanceof \WC_Order) {
                 $current = $order->get_status();
-                if (in_array($current, ['cancelled', 'refunded', 'failed', 'trash'], true)) {
-                    $wc_skipped_status = $current;
-                } else {
-                    try {
-                        $order->update_status('cancelled', sprintf(
-                            '[iptv-connect] Dossier #%d supprimé via Cockpit · ligne NewPanel %s · commande annulée pour cohérence.',
-                            $id,
-                            $newpanel_refunded ? '#' . $line_id . ' refund' : ($line_id > 0 ? '#' . $line_id . ' refund_failed' : 'absente')
-                        ));
-                        $wc_cancelled = true;
-                    } catch (\Throwable $e) {
-                        error_log('[iptv-connect/delete] WC cancel fail (order #' . $order_id . '): ' . $e->getMessage());
+                if ($trash_wc_order) {
+                    // Met la commande en CORBEILLE WC (récupérable)
+                    if ($current === 'trash') {
+                        $wc_action = 'already_trash';
+                    } else {
+                        try {
+                            // HPOS-compatible : $order->delete(false) → trash, true → force delete
+                            $order->delete(false);
+                            $wc_action = 'trashed';
+                        } catch (\Throwable $e) {
+                            // Fallback non-HPOS
+                            wp_trash_post($order_id);
+                            $wc_action = 'trashed';
+                            error_log('[iptv-connect/delete] WC trash fallback wp_trash_post : ' . $e->getMessage());
+                        }
+                    }
+                } elseif ($remove_dossier) {
+                    // Pas de trash demandé mais on supprime le dossier → on annule la commande
+                    if (in_array($current, ['cancelled', 'refunded', 'failed', 'trash'], true)) {
+                        $wc_action = 'already_' . $current;
+                    } else {
+                        try {
+                            $order->update_status('cancelled', sprintf(
+                                '[iptv-connect] Dossier #%d supprimé · ligne NewPanel %s · commande annulée pour cohérence.',
+                                $id,
+                                $newpanel_refunded ? '#' . $line_id . ' refund' : ($line_id > 0 ? '#' . $line_id . ' refund_failed' : 'absente')
+                            ));
+                            $wc_action = 'cancelled';
+                        } catch (\Throwable $e) {
+                            error_log('[iptv-connect/delete] WC cancel fail (order #' . $order_id . '): ' . $e->getMessage());
+                        }
                     }
                 }
             }
         }
 
-        // 3. Suppression du post (cascade post_meta automatique)
-        $ok = wp_delete_post($id, true);
-        if (!$ok) {
-            return new WP_Error(
-                'iptv_connect_delete_failed',
-                'Échec de la suppression du dossier WP (les étapes 1 et 2 sont déjà appliquées).',
-                ['status' => 500]
-            );
+        // 4. Suppression du post UNIQUEMENT si remove_dossier=true
+        $dossier_removed = false;
+        if ($remove_dossier) {
+            $ok = wp_delete_post($id, true);
+            if (!$ok) {
+                return new WP_Error(
+                    'iptv_connect_delete_failed',
+                    'Échec de la suppression du dossier WP (les étapes précédentes sont déjà appliquées).',
+                    ['status' => 500]
+                );
+            }
+            $dossier_removed = true;
         }
 
-        // 4. Audit + hook
+        // 5. Audit + hook
         IptvCoreBridge::audit('DELETE_DOSSIER', 'dossier', $id, [
-            'newpanel_line_id'   => $line_id,
-            'newpanel_managed'   => $managed,
-            'newpanel_refunded'  => $newpanel_refunded,
-            'newpanel_error'     => $newpanel_error,
-            'wc_order_id'        => $order_id,
-            'wc_cancelled'       => $wc_cancelled,
-            'wc_skipped_status'  => $wc_skipped_status,
-            'simulated'          => $is_simulated,
+            'remove_dossier'      => $remove_dossier,
+            'disable_renewal'     => $disable_renewal_cron,
+            'trash_wc'            => $trash_wc_order,
+            'newpanel_line_id'    => $line_id,
+            'newpanel_refunded'   => $newpanel_refunded,
+            'newpanel_error'      => $newpanel_error,
+            'wc_order_id'         => $order_id,
+            'wc_action'           => $wc_action,
+            'simulated'           => $is_simulated,
         ]);
         do_action('iptv_connect/dossier.deleted', $id, [
-            'newpanel_refunded'  => $newpanel_refunded,
-            'wc_cancelled'       => $wc_cancelled,
+            'remove_dossier'      => $remove_dossier,
+            'newpanel_refunded'   => $newpanel_refunded,
+            'wc_action'           => $wc_action,
+            'renewal_disabled'    => $renewal_disabled,
         ]);
 
         // Message human-readable
-        $parts = ['Dossier #' . $id . ' supprimé'];
-        if ($managed && $line_id > 0) {
+        $parts = [];
+        if ($dossier_removed) {
+            $parts[] = 'Dossier #' . $id . ' supprimé';
+        } else {
+            $parts[] = 'Dossier #' . $id . ' conservé';
+        }
+        if ($renewal_disabled) {
+            $parts[] = '🚫 renouvellement auto désactivé';
+        }
+        if ($managed && $line_id > 0 && $remove_dossier) {
             $parts[] = $newpanel_refunded
                 ? '✅ ligne NewPanel #' . $line_id . ' refund (crédit restitué)'
                 : ($is_simulated ? '🧪 ligne simulée (pas d\'appel API)' : '⚠️ refund NewPanel échoué : ' . $newpanel_error);
         }
         if ($order_id > 0) {
-            if ($wc_cancelled) {
-                $parts[] = '✅ commande WC #' . $order_id . ' annulée';
-            } elseif ($wc_skipped_status !== null) {
-                $parts[] = 'ℹ️ commande WC #' . $order_id . ' déjà ' . $wc_skipped_status . ' (skip)';
+            switch ($wc_action) {
+                case 'trashed':       $parts[] = '🗑 commande WC #' . $order_id . ' en corbeille'; break;
+                case 'cancelled':     $parts[] = '✅ commande WC #' . $order_id . ' annulée'; break;
+                case 'already_trash': $parts[] = 'ℹ️ commande WC #' . $order_id . ' déjà en corbeille'; break;
+                default:
+                    if (str_starts_with($wc_action, 'already_')) {
+                        $parts[] = 'ℹ️ commande WC #' . $order_id . ' déjà ' . substr($wc_action, 8) . ' (skip)';
+                    }
             }
         }
 
         return new WP_REST_Response([
             'ok'                 => true,
             'id'                 => $id,
+            'dossier_removed'    => $dossier_removed,
+            'renewal_disabled'   => $renewal_disabled,
             'newpanel_refunded'  => $newpanel_refunded,
             'newpanel_error'     => $newpanel_error,
-            'wc_cancelled'       => $wc_cancelled,
-            'wc_skipped_status'  => $wc_skipped_status,
+            'wc_action'          => $wc_action,
             'message'            => implode(' · ', $parts),
         ], 200);
     }
