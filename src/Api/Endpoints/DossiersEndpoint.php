@@ -526,6 +526,18 @@ final class DossiersEndpoint
             return new WP_Error('iptv_connect_creds_failed', $e->getMessage(), ['status' => 500]);
         }
 
+        // IMPORTANT : poser les champs "clear" affichés par le Cockpit.
+        // host + user ne sont PAS secrets (le pwd reste chiffré et révélé à la
+        // demande). Sans ces meta, le Cockpit affiche un dossier actif SANS
+        // identifiants visibles (bug observé : fatibelhou06 / benji08815506).
+        // Idem que Provisioning::activate (iptv-core) qui les pose déjà.
+        update_post_meta($id, '_iptv_creds_host_clear', $host);
+        update_post_meta($id, '_iptv_creds_user_clear', $user);
+        update_post_meta($id, '_iptv_creds_updated_at', current_time('mysql'));
+        if ($url !== '') {
+            update_post_meta($id, '_iptv_creds_url_changed_at', current_time('mysql'));
+        }
+
         // Statut → actif
         update_post_meta($id, '_iptv_statut', 'actif');
         // Marqueur explicite : ce dossier n'est PAS managé par NewPanel
