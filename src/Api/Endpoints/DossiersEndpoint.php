@@ -692,11 +692,43 @@ final class DossiersEndpoint
             'orderby'        => 'modified',
             'order'          => 'DESC',
         ];
+        $status_clause = null;
         if ($status !== '') {
-            $args['meta_query'] = [['key' => '_iptv_statut', 'value' => $status]];
+            $status_clause = ['key' => '_iptv_statut', 'value' => $status];
         }
+
+        // Recherche : l'email/login/host sont en post_meta (PAS dans le titre).
+        // Utiliser $args['s'] (recherche WP titre+contenu) ne matche donc jamais
+        // un email. On construit une meta_query OR sur les champs réels.
+        $search_clause = null;
         if ($search !== '') {
-            $args['s'] = $search;
+            // Détection : si la recherche est un numéro pur → match aussi post ID
+            $search_clause = [
+                'relation' => 'OR',
+                ['key' => '_iptv_client_email',     'value' => $search, 'compare' => 'LIKE'],
+                ['key' => '_iptv_creds_user_clear', 'value' => $search, 'compare' => 'LIKE'],
+                ['key' => '_iptv_creds_host_clear', 'value' => $search, 'compare' => 'LIKE'],
+                ['key' => '_iptv_wc_order_id',      'value' => $search, 'compare' => 'LIKE'],
+                ['key' => '_iptv_renewal_login',    'value' => $search, 'compare' => 'LIKE'],
+            ];
+            // Bonus : recherche par #ID de dossier (numéro pur)
+            if (ctype_digit($search)) {
+                $args['post__in'] = [(int) $search];
+                // post__in restreint trop si combiné — on le laisse en complément
+                // via une 2ème passe seulement si la meta_query ne retourne rien.
+                // Plus simple : ne PAS poser post__in ici, le _iptv_wc_order_id LIKE
+                // couvre déjà le n° de commande. On retire pour éviter le conflit.
+                unset($args['post__in']);
+            }
+        }
+
+        // Combiner status + search selon ce qui est présent
+        if ($status_clause && $search_clause) {
+            $args['meta_query'] = ['relation' => 'AND', $status_clause, $search_clause];
+        } elseif ($status_clause) {
+            $args['meta_query'] = [$status_clause];
+        } elseif ($search_clause) {
+            $args['meta_query'] = $search_clause;
         }
         // Sync incrémentale : ne retourne que les dossiers modifiés depuis $since
         if ($since !== '' && ($ts = strtotime($since)) !== false) {

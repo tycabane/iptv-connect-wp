@@ -3,7 +3,7 @@
  * Plugin Name:       IPTV Connect
  * Plugin URI:        https://github.com/tycabane/iptv-connect-wp
  * Description:       Connecte ce site WordPress au dashboard admin IPTV central. Expose dossiers + clients + KPI + panels + audit + email templates + cron via REST API sécurisée.
- * Version:           0.9.3
+ * Version:           0.9.4
  * Author:            Houssine Idsaid
  * License:           Proprietary
  * Requires at least: 6.0
