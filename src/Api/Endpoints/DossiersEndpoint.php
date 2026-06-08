@@ -486,9 +486,177 @@ final class DossiersEndpoint
             return new WP_Error('iptv_connect_no_vault', 'CredsVault indisponible (IPTV_MASTER_KEY manquant ?).', ['status' => 503]);
         }
 
-        // Parser le M3U si fourni
-        $m3u_url = trim((string) ($body['m3u_url'] ?? ''));
-        $parsed = [];
+        // ── Construire la liste d'accès à activer ───────────────────────────
+        // Forme A (multi)      : body.accesses = [ {m3u_url} | {host,user,pwd,url?,port?}, … ]
+        // Forme B (legacy mono): champs au niveau racine (m3u_url OU host/user/pwd).
+        // → backward-compatible : sans `accesses`, l'unique accès racine est utilisé
+        //   et l'email mono-accès (template éditable) est conservé à l'identique.
+        if (isset($body['accesses']) && is_array($body['accesses']) && $body['accesses'] !== []) {
+            $raw_accesses = array_values($body['accesses']);
+        } else {
+            $raw_accesses = [$body];
+        }
+
+        if (count($raw_accesses) > self::MAX_MANUAL_ACCESSES) {
+            return new WP_Error(
+                'iptv_connect_too_many_accesses',
+                sprintf('Maximum %d accès par activation.', self::MAX_MANUAL_ACCESSES),
+                ['status' => 400]
+            );
+        }
+
+        // Valider/normaliser TOUS les accès AVANT toute écriture (atomicité best-effort).
+        $accesses = [];
+        foreach ($raw_accesses as $idx => $raw) {
+            $norm = self::normalizeManualAccess(is_array($raw) ? $raw : []);
+            if ($norm instanceof WP_Error) {
+                if (count($raw_accesses) > 1) {
+                    return new WP_Error(
+                        $norm->get_error_code(),
+                        sprintf('Accès #%d : %s', $idx + 1, $norm->get_error_message()),
+                        ['status' => 400]
+                    );
+                }
+                return $norm;
+            }
+            $accesses[] = $norm;
+        }
+
+        // ── 1) Accès principal → dossier de la commande ($id) ───────────────
+        $primary = $accesses[0];
+        try {
+            self::applyManualCredsToDossier($creds_svc, $id, $primary);
+        } catch (\Throwable $e) {
+            return new WP_Error('iptv_connect_creds_failed', $e->getMessage(), ['status' => 500]);
+        }
+
+        // ── 2) Accès supplémentaires → dossiers clonés (même client) ────────
+        // Les méta client sont copiées depuis le dossier principal ; ces dossiers
+        // ne portent PAS de _iptv_wc_order_id (la commande reste rattachée au seul
+        // dossier principal) mais un marqueur de provenance + un lien parent.
+        $all_ids    = [$id];
+        $extra_ids  = [];
+        $clone_keys = [
+            '_iptv_client_email', '_iptv_client_user_id', '_iptv_formule',
+            '_iptv_duree_mois', '_iptv_ecrans', '_iptv_prix',
+            '_iptv_date_expiration', '_iptv_mode_discret',
+        ];
+        $client_email = (string) get_post_meta($id, '_iptv_client_email', true);
+        for ($i = 1, $n = count($accesses); $i < $n; $i++) {
+            $new_id = wp_insert_post([
+                'post_type'   => 'iptv_dossier',
+                'post_status' => 'publish',
+                'post_title'  => $client_email !== '' ? $client_email : ('Accès supplémentaire #' . $id),
+            ], true);
+            if (is_wp_error($new_id) || !$new_id) {
+                error_log('[iptv-connect] activate-manual: création dossier supplémentaire #' . $i . ' a échoué.');
+                continue;
+            }
+            $new_id = (int) $new_id;
+            foreach ($clone_keys as $mk) {
+                $val = get_post_meta($id, $mk, true);
+                if ($val !== '' && $val !== false) {
+                    update_post_meta($new_id, $mk, $val);
+                }
+            }
+            update_post_meta($new_id, '_iptv_source', 'admin_multi_access');
+            update_post_meta($new_id, '_iptv_parent_dossier_id', $id);
+            try {
+                self::applyManualCredsToDossier($creds_svc, $new_id, $accesses[$i]);
+            } catch (\Throwable $e) {
+                error_log('[iptv-connect] activate-manual: creds dossier supplémentaire #' . $new_id . ' KO : ' . $e->getMessage());
+                continue;
+            }
+            if (class_exists('\\IptvCore\\Domain\\HistoryLogger')) {
+                \IptvCore\Domain\HistoryLogger::log(
+                    $new_id,
+                    sprintf('✏️ Accès supplémentaire créé (multi-accès, saisie admin) · rattaché à #%d · host=%s', $id, $accesses[$i]['host'])
+                );
+            }
+            $extra_ids[] = $new_id;
+            $all_ids[]   = $new_id;
+        }
+
+        $count = count($all_ids);
+
+        // ── 3) Email client : UN SEUL email ────────────────────────────────
+        // mono  → template éditable « credentials » (StatusNotifier::send)
+        // multi → email récap listant tous les accès (sendMultiCredentials)
+        if (class_exists('\\IptvCore\\Email\\StatusNotifier')) {
+            try {
+                if ($count > 1 && method_exists('\\IptvCore\\Email\\StatusNotifier', 'sendMultiCredentials')) {
+                    \IptvCore\Email\StatusNotifier::sendMultiCredentials($id, $all_ids);
+                } else {
+                    \IptvCore\Email\StatusNotifier::send($id, 'actif');
+                }
+            } catch (\Throwable $e) {
+                error_log('[iptv-connect] activate-manual: email client failed: ' . $e->getMessage());
+            }
+        }
+
+        // ── 4) History log (dossier principal) ──────────────────────────────
+        if (class_exists('\\IptvCore\\Domain\\HistoryLogger')) {
+            $msg = $count > 1
+                ? sprintf('✏️ Activation manuelle multi-accès (%d accès · 1 email récap) · host=%s · user=%s', $count, $primary['host'], $primary['user'])
+                : sprintf('✏️ Activation manuelle (saisie admin) · host=%s · user=%s', $primary['host'], $primary['user']);
+            \IptvCore\Domain\HistoryLogger::log($id, $msg);
+        }
+
+        // ── 5) Sync commande WC → "Completed" (une seule fois, sur le principal) ──
+        if (class_exists('\\IptvCore\\Admin\\Cockpit\\AjaxHandlers')) {
+            try {
+                \IptvCore\Admin\Cockpit\AjaxHandlers::syncWcOrderToCompleted(
+                    $id,
+                    sprintf('saisie manuelle · host=%s%s', $primary['host'], $count > 1 ? sprintf(' · %d accès', $count) : '')
+                );
+            } catch (\Throwable $e) {
+                error_log('[iptv-connect] activate-manual: WC sync failed: ' . $e->getMessage());
+            }
+        }
+
+        IptvCoreBridge::audit('ACTIVATE_MANUAL', 'dossier', $id, [
+            'host'      => $primary['host'],
+            'from_m3u'  => $primary['from_m3u'],
+            'count'     => $count,
+            'extra_ids' => $extra_ids,
+        ]);
+        do_action('iptv_connect/dossier.activated_manual', $id, [
+            'host'  => $primary['host'],
+            'user'  => $primary['user'],
+            'count' => $count,
+            'ids'   => $all_ids,
+        ]);
+
+        $message = $count > 1
+            ? sprintf('%d accès activés · 1 email récap envoyé au client.', $count)
+            : 'Dossier activé (manuel) · email client envoyé.';
+
+        return new WP_REST_Response([
+            'ok'      => true,
+            'id'      => $id,
+            'host'    => $primary['host'],
+            'user'    => $primary['user'],
+            'statut'  => 'actif',
+            'count'   => $count,
+            'ids'     => $all_ids,
+            'message' => $message,
+        ], 200);
+    }
+
+    /** Nombre max d'accès activables en une seule saisie manuelle. */
+    private const MAX_MANUAL_ACCESSES = 5;
+
+    /**
+     * Normalise UN accès de saisie manuelle (m3u_url OU host/user/pwd).
+     * Merge : champs explicites (host/user/pwd/url/port) > valeurs dérivées du M3U.
+     *
+     * @param array<string,mixed> $a
+     * @return array{host:string,user:string,pwd:string,url:string,port:string,from_m3u:bool}|WP_Error
+     */
+    private static function normalizeManualAccess(array $a)
+    {
+        $m3u_url = trim((string) ($a['m3u_url'] ?? ''));
+        $parsed  = [];
         if ($m3u_url !== '') {
             $parsed = self::parseM3uUrl($m3u_url);
             if ($parsed === null) {
@@ -501,12 +669,11 @@ final class DossiersEndpoint
             $parsed['url'] = $m3u_url; // garde l'URL complète pour l'email client
         }
 
-        // Merger explicit (body) > parsed (m3u_url)
-        $host = trim((string) ($body['host'] ?? $parsed['host'] ?? ''));
-        $user = trim((string) ($body['user'] ?? $parsed['user'] ?? ''));
-        $pwd  = trim((string) ($body['pwd']  ?? $parsed['pwd']  ?? ''));
-        $url  = trim((string) ($body['url']  ?? $parsed['url']  ?? ''));
-        $port = trim((string) ($body['port'] ?? $parsed['port'] ?? ''));
+        $host = trim((string) ($a['host'] ?? $parsed['host'] ?? ''));
+        $user = trim((string) ($a['user'] ?? $parsed['user'] ?? ''));
+        $pwd  = trim((string) ($a['pwd']  ?? $parsed['pwd']  ?? ''));
+        $url  = trim((string) ($a['url']  ?? $parsed['url']  ?? ''));
+        $port = trim((string) ($a['port'] ?? $parsed['port'] ?? ''));
 
         if ($host === '' || $user === '' || $pwd === '') {
             return new WP_Error(
@@ -516,77 +683,43 @@ final class DossiersEndpoint
             );
         }
 
-        try {
-            $creds_svc->set($id, 'host', $host);
-            $creds_svc->set($id, 'user', $user);
-            $creds_svc->set($id, 'pwd',  $pwd);
-            if ($url  !== '') $creds_svc->set($id, 'url',  $url);
-            if ($port !== '') $creds_svc->set($id, 'port', $port);
-        } catch (\Throwable $e) {
-            return new WP_Error('iptv_connect_creds_failed', $e->getMessage(), ['status' => 500]);
-        }
+        return [
+            'host'     => $host,
+            'user'     => $user,
+            'pwd'      => $pwd,
+            'url'      => $url,
+            'port'     => $port,
+            'from_m3u' => $m3u_url !== '',
+        ];
+    }
 
-        // IMPORTANT : poser les champs "clear" affichés par le Cockpit.
-        // host + user ne sont PAS secrets (le pwd reste chiffré et révélé à la
-        // demande). Sans ces meta, le Cockpit affiche un dossier actif SANS
-        // identifiants visibles (bug observé : fatibelhou06 / benji08815506).
-        // Idem que Provisioning::activate (iptv-core) qui les pose déjà.
-        update_post_meta($id, '_iptv_creds_host_clear', $host);
-        update_post_meta($id, '_iptv_creds_user_clear', $user);
+    /**
+     * Chiffre les credentials + pose les méta « clear » + statut actif sur un dossier.
+     *
+     * IMPORTANT : poser host/user en clair (non secrets) car le Cockpit les affiche ;
+     * le pwd reste chiffré et révélé à la demande. Sans ces meta, le Cockpit montre
+     * un dossier actif SANS identifiants visibles.
+     *
+     * @param object                                                              $creds_svc
+     * @param array{host:string,user:string,pwd:string,url:string,port:string}    $c
+     * @throws \Throwable si le chiffrement échoue (laissé remonter pour le principal).
+     */
+    private static function applyManualCredsToDossier($creds_svc, int $id, array $c): void
+    {
+        $creds_svc->set($id, 'host', $c['host']);
+        $creds_svc->set($id, 'user', $c['user']);
+        $creds_svc->set($id, 'pwd',  $c['pwd']);
+        if ($c['url']  !== '') $creds_svc->set($id, 'url',  $c['url']);
+        if ($c['port'] !== '') $creds_svc->set($id, 'port', $c['port']);
+
+        update_post_meta($id, '_iptv_creds_host_clear', $c['host']);
+        update_post_meta($id, '_iptv_creds_user_clear', $c['user']);
         update_post_meta($id, '_iptv_creds_updated_at', current_time('mysql'));
-        if ($url !== '') {
+        if ($c['url'] !== '') {
             update_post_meta($id, '_iptv_creds_url_changed_at', current_time('mysql'));
         }
-
-        // Statut → actif
         update_post_meta($id, '_iptv_statut', 'actif');
-        // Marqueur explicite : ce dossier n'est PAS managé par NewPanel
         update_post_meta($id, '_iptv_newpanel_managed', 0);
-
-        // Email client avec ses credentials (template iptv-core)
-        if (class_exists('\\IptvCore\\Email\\StatusNotifier')) {
-            try {
-                \IptvCore\Email\StatusNotifier::send($id, 'actif');
-            } catch (\Throwable $e) {
-                // best-effort ; on log mais on ne bloque pas l'activation
-                error_log('[iptv-connect] activate-manual: email client failed: ' . $e->getMessage());
-            }
-        }
-
-        // History log si dispo
-        if (class_exists('\\IptvCore\\Domain\\HistoryLogger')) {
-            \IptvCore\Domain\HistoryLogger::log(
-                $id,
-                sprintf('✏️ Activation manuelle (saisie admin) · host=%s · user=%s', $host, $user)
-            );
-        }
-
-        // Sync commande WC → "Completed" (l'activation marque la livraison de l'abonnement)
-        if (class_exists('\\IptvCore\\Admin\\Cockpit\\AjaxHandlers')) {
-            try {
-                \IptvCore\Admin\Cockpit\AjaxHandlers::syncWcOrderToCompleted(
-                    $id,
-                    sprintf('saisie manuelle · host=%s', $host)
-                );
-            } catch (\Throwable $e) {
-                error_log('[iptv-connect] activate-manual: WC sync failed: ' . $e->getMessage());
-            }
-        }
-
-        IptvCoreBridge::audit('ACTIVATE_MANUAL', 'dossier', $id, [
-            'host'      => $host,
-            'from_m3u'  => $m3u_url !== '',
-        ]);
-        do_action('iptv_connect/dossier.activated_manual', $id, ['host' => $host, 'user' => $user]);
-
-        return new WP_REST_Response([
-            'ok'     => true,
-            'id'     => $id,
-            'host'   => $host,
-            'user'   => $user,
-            'statut' => 'actif',
-            'message' => 'Dossier activé (manuel) · email client envoyé.',
-        ], 200);
     }
 
     /**
